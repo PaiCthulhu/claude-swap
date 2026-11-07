@@ -272,6 +272,34 @@ try {
     Invoke-Swap WORK
     Assert ($script:Output -match 'Already using') 'switching to the active account is a no-op (alias match ignores case)'
 
+    Section 'Switch history'
+    $historyPath = Join-Path $StoreDir 'history.jsonl'
+    $lines = @(Get-Content -LiteralPath $historyPath -ErrorAction SilentlyContinue | Where-Object { $_ })
+    $entries = @($lines | ForEach-Object { $_ | ConvertFrom-Json })
+    Assert ($entries.Count -eq 4) 'each switch so far left one line'
+    Assert ($entries.Count -ge 1 -and $entries[0].from -eq 'a@example.com' -and $entries[0].to -eq 'b@example.com' -and $entries[0].loggedOut -eq $true) 'a switch that logs out is recorded as such'
+    Assert ($entries.Count -ge 2 -and $entries[1].from -eq 'b@example.com' -and $entries[1].to -eq 'a@example.com' -and $entries[1].loggedOut -eq $false) 'a normal switch records from and to'
+    Assert ($entries.Count -ge 3 -and [Math]::Abs([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $entries[2].t) -lt 60000) 'the time is the moment of the switch, in epoch ms'
+    Invoke-Swap work
+    Assert (@(Get-Content -LiteralPath $historyPath -ErrorAction SilentlyContinue | Where-Object { $_ }).Count -eq 4) '"already using" records nothing'
+    $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $seed = @(
+        (@{ t = $nowMs - 91 * $Day; from = 'x@example.com'; to = 'y@example.com'; loggedOut = $false } | ConvertTo-Json -Compress),
+        (@{ t = $nowMs - 89 * $Day; from = 'y@example.com'; to = 'x@example.com'; loggedOut = $false } | ConvertTo-Json -Compress)
+    ) + $lines
+    [IO.File]::WriteAllText($historyPath, (($seed -join "`n") + "`n"))
+    Invoke-Swap personal
+    $entries = @(Get-Content -LiteralPath $historyPath | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
+    Assert (@($entries | Where-Object { $_.t -eq ($nowMs - 91 * $Day) }).Count -eq 0) 'lines older than 90 days are pruned'
+    Assert (@($entries | Where-Object { $_.t -eq ($nowMs - 89 * $Day) }).Count -eq 1) 'lines within 90 days are kept'
+    Assert ($entries.Count -eq 6 -and $entries[5].to -eq 'b@example.com') 'the new switch is appended'
+    Remove-Item -LiteralPath $historyPath
+    New-Item -ItemType Directory -Path $historyPath | Out-Null
+    Invoke-Swap work
+    Assert ((Get-Live).Email -eq 'a@example.com') 'the switch goes through even when the history cannot be written'
+    Assert ($script:Warnings -match 'history') 'the failure is reported as a warning'
+    Remove-Item -LiteralPath $historyPath -Recurse -Force
+
     Section 'An unregistered login is never thrown away silently'
     Set-FakeLogin 'c@example.com' 'org-c' (New-OAuth 'c' 'c-refresh-1' ($Now + 10 * $Day))
     Assert-Throws { Invoke-Swap personal } 'not registered' 'switching away from it is refused'

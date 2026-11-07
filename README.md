@@ -158,6 +158,23 @@ changes:
 Anything else on your machine that borrows Claude Code's login file (some agent tools do) will
 follow the switch too.
 
+## Switch history
+
+Every switch appends one line to `history.jsonl` in the claude-swap folder, so other tools (a
+usage dashboard, say) can tell which account was in use at a given moment:
+
+```json
+{"t":1793985718169,"from":"work@example.com","to":"me@example.com","loggedOut":false}
+```
+
+- `t` is the moment of the switch, in milliseconds since the Unix epoch (UTC).
+- `from` is the account that was logged in, or `null` if Claude Code was logged out.
+- `loggedOut` is `true` when the target had no usable saved login, so Claude Code was left
+  logged out and you log in as `to` next.
+- Running claude-swap for the account already in use records nothing.
+- Lines older than 90 days are dropped whenever a new line is written.
+- If the file can't be written, claude-swap prints a warning and the switch still goes through.
+
 ## Configuration
 
 | Variable | Effect |

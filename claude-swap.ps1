@@ -443,6 +443,28 @@ function Set-LastSelected([string] $Name) {
     Write-FileAtomic -Path $script:StatePath -Text ((@{ lastSelected = $Name } | ConvertTo-Json) -replace "`r`n", "`n")
 }
 
+# Appends one line per switch to history.jsonl and drops lines older than 90 days. Other tools (a usage dashboard,
+# for one) read it to know which account was in use when. A failure here never undoes the switch.
+function Add-SwapHistory([string] $From, [string] $To, [bool] $LoggedOut) {
+    try {
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        $cutoff = $now - 90L * 24 * 3600 * 1000
+        $kept = [Collections.Generic.List[string]]::new()
+        if (Test-Path -LiteralPath $script:HistoryPath -PathType Leaf) {
+            foreach ($line in [IO.File]::ReadAllLines($script:HistoryPath)) {
+                if (-not $line.Trim()) { continue }
+                try { $t = [long] ($line | ConvertFrom-Json).t } catch { continue }
+                if ($t -ge $cutoff) { $kept.Add($line) }
+            }
+        }
+        $entry = [ordered] @{ t = $now; from = $(if ($From) { $From } else { $null }); to = $To; loggedOut = $LoggedOut }
+        $kept.Add(($entry | ConvertTo-Json -Compress))
+        Write-FileAtomic -Path $script:HistoryPath -Text (($kept -join "`n") + "`n")
+    } catch {
+        Write-Warning "Could not record the switch in history.jsonl: $(Get-ErrorMessage $_)"
+    }
+}
+
 #endregion
 
 #region Live login (what Claude Code is using now)
@@ -684,10 +706,12 @@ function Invoke-Switch([string] $Reference, [bool] $Force) {
     }
 
     $previous = if ($sync.Account) { Format-Account $sync.Account } elseif ($sync.Email) { $sync.Email } else { 'logged out' }
+    $fromEmail = if ($sync.Account) { $sync.Account.Name } elseif ($sync.Email) { ConvertTo-AccountKey $sync.Email } else { '' }
     $status = Get-LoginStatus $target
     if ($status -ne 'ok') {
         Write-LiveLogin -PayloadJson '' -ExpectedLive $sync.LivePayload
         Set-LastSelected $target.Name
+        Add-SwapHistory -From $fromEmail -To $target.Name -LoggedOut $true
         $reason = switch ($status) {
             'empty' { 'has no saved login yet' }
             'expired' { "has a saved login that expired on $(Format-Time $target.RefreshTokenExpiresAt)" }
@@ -701,6 +725,7 @@ function Invoke-Switch([string] $Reference, [bool] $Force) {
 
     Write-LiveLogin -PayloadJson (Unprotect-Text $target.Login) -ExpectedLive $sync.LivePayload
     Set-LastSelected $target.Name
+    Add-SwapHistory -From $fromEmail -To $target.Name -LoggedOut $false
     Write-Host "Switched to $(Format-Account $target) [$(Format-Plan $target.Plan $target.RateLimitTier)] (was $previous)." -ForegroundColor Green
     Write-SessionWarning
 }
@@ -793,6 +818,7 @@ try {
     $script:StoreDir = if ($env:CLAUDE_SWAP_HOME) { $env:CLAUDE_SWAP_HOME } else { Join-Path $env:LOCALAPPDATA 'claude-swap' }
     $script:AccountsDir = Join-Path $script:StoreDir 'accounts'
     $script:StatePath = Join-Path $script:StoreDir 'state.json'
+    $script:HistoryPath = Join-Path $script:StoreDir 'history.jsonl'
     Assert-SupportedSetup
     Add-Type -AssemblyName System.Security.Cryptography.ProtectedData
 
